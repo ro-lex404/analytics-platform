@@ -1,3 +1,6 @@
+# PyTorch CPU index to avoid downloading multi-gigabyte CUDA wheels
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # --- Web API & Server ---
 fastapi==0.115.*
 uvicorn[standard]==0.34.*
@@ -27,3 +30,6 @@ langchain-huggingface==0.1.*
 sentence-transformers==3.*
 
 pypdf==5.0.*
+
+faker==40.*
+reportlab==5.0.*

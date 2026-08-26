@@ -30,6 +30,7 @@ services:
 
   # 3. FastAPI Backend
   api:
+    image: analytics-platform-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -40,10 +41,12 @@ services:
     environment:
       - DATABASE_URL=postgresql://myuser:mypassword@db:5432/hybrid_ai
       - REDIS_URL=redis://redis:6379/0
-      - GROQ_API_KEY=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
+      - FINANCE_DATA_DIR=/app/finance-data
+      - GROQ_API_KEY=${GROQ_API_KEY}
     volumes:
       - ./backend:/app                # Hot-reloading for local development
       - ./backend/uploads:/app/uploads   # Shared volume for PDFs/CSVs
+      - ./razorpay-reconciler/data:/app/finance-data:ro
     depends_on:
       db:
         condition: service_healthy
@@ -55,6 +58,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: analytics-platform-backend:latest
     container_name: hybrid_celery
     restart: unless-stopped
     # The command overrides the default FastAPI start command in your Dockerfile
@@ -62,9 +66,11 @@ services:
     environment:
       - DATABASE_URL=postgresql://myuser:mypassword@db:5432/hybrid_ai
       - REDIS_URL=redis://redis:6379/0
+      - FINANCE_DATA_DIR=/app/finance-data
     volumes:
       - ./backend:/app
       - ./backend/uploads:/app/uploads   # Must match API uploads mount so Celery can read uploaded files
+      - ./razorpay-reconciler/data:/app/finance-data:ro
     depends_on:
       db:
         condition: service_healthy

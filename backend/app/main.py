@@ -1,10 +1,18 @@
 import os
 import re
+from pathlib import Path
+import duckdb
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from app.services.reconciliation import (
+    default_finance_data_dir,
+    reconcile_settlements,
+    verify_reconciliation_integrity,
+    get_reconciliation_context_summary,
+)
 
 # Import the Celery worker task and compiled LangGraph workflow
 from app.worker import process_document_task
@@ -34,6 +42,11 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     query: str
+
+
+class ReconciliationRequest(BaseModel):
+    razorpay_path: str | None = None
+    bank_path: str | None = None
 
 
 def _collapse_exact_repetition(text: str) -> str:
@@ -89,8 +102,89 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    inputs = {"question": request.query}
+    reconciliation_context = get_reconciliation_context_summary()
+    inputs = {
+        "question": request.query,
+        "reconciliation_context": reconciliation_context,
+    }
     final_state = await agent_app.ainvoke(inputs)
     final_answer = final_state.get("final_answer", "")
     normalized_answer = normalize_final_answer(final_answer)
     return JSONResponse({"answer": normalized_answer})
+
+
+@app.post("/finance/reconcile")
+async def finance_reconciliation(request: ReconciliationRequest):
+    """Reconcile a settlement batch and return measurable exceptions."""
+    data_dir = default_finance_data_dir()
+    razorpay_path = request.razorpay_path or str(data_dir / "razorpay_settlements.csv")
+    bank_path = request.bank_path or str(data_dir / "bank_statement.csv")
+    return reconcile_settlements(razorpay_path, bank_path)
+
+# Verification endpoint to check for duplicates across match sets
+@app.get("/finance/verify")
+def verify_no_duplicates():
+    data_dir = default_finance_data_dir()
+    razorpay_path = str(data_dir / "razorpay_settlements.csv")
+    bank_path = str(data_dir / "bank_statement.csv")
+    return verify_reconciliation_integrity(razorpay_path, bank_path)
+
+
+from app.agent.pdf_reconciler import pdf_reconciler_graph
+
+
+@app.post("/finance/extract-pdf")
+async def extract_and_reconcile_pdf(file: UploadFile = File(...)):
+    """Extracts invoice records from uploaded PDF and reconciles against bank statements via LangGraph."""
+    pdf_bytes = await file.read()
+
+    initial_state = {
+        "pdf_bytes": pdf_bytes,
+        "filename": file.filename,
+        "full_text": "",
+        "extracted_records": [],
+        "reconciliation_results": {},
+    }
+
+    final_state = await pdf_reconciler_graph.ainvoke(initial_state)
+
+    return {
+        "source": file.filename,
+        "extracted_count": len(final_state["extracted_records"]),
+        "records": final_state["extracted_records"],
+        "reconciliation": final_state["reconciliation_results"],
+    }
+
+
+from app.services.pdf_report_generator import generate_reconciliation_pdf_report
+
+
+class AuditReportRequest(BaseModel):
+    source_filename: str = "invoices.pdf"
+    extracted_count: int = 0
+    matched_count: int = 0
+    exception_count: int = 0
+    exceptions: list[dict] = []
+    matches: list[dict] = []
+
+
+@app.post("/finance/export-report")
+async def export_audit_pdf_report(request: AuditReportRequest):
+    """Generates and downloads a timestamped PDF audit report of faulty transactions."""
+    pdf_bytes = generate_reconciliation_pdf_report(
+        source_filename=request.source_filename,
+        extracted_count=request.extracted_count,
+        matched_count=request.matched_count,
+        exception_count=request.exception_count,
+        exceptions=request.exceptions,
+        matches=request.matches,
+    )
+
+    clean_name = request.source_filename.replace(".pdf", "")
+    filename = f"Reconciliation_Audit_Report_{clean_name}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
