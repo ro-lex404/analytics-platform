@@ -84,21 +84,34 @@ def normalize_final_answer(answer: str) -> str:
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """Saves uploaded PDFs/CSVs and triggers the Celery background task."""
-    
-    # 1. Guarantee the directory exists so it never fails
+    """Saves uploaded PDFs/CSVs, triggers Celery vector embedding, and runs live PDF reconciliation if PDF."""
     upload_dir = "./uploads"
     os.makedirs(upload_dir, exist_ok=True)
     
     file_location = f"{upload_dir}/{file.filename}"
+    pdf_bytes = await file.read()
     
     with open(file_location, "wb+") as file_object:
-        file_object.write(file.file.read())
+        file_object.write(pdf_bytes)
         
-    # Dispatch heavy processing job to Redis/Celery worker
+    # Dispatch vector store embedding task to Celery
     process_document_task.delay(file_location, file.filename)
+
+    # If uploaded file is a PDF, run live PDF reconciliation to update context memory immediately
+    if file.filename.lower().endswith(".pdf"):
+        try:
+            initial_state = {
+                "pdf_bytes": pdf_bytes,
+                "filename": file.filename,
+                "full_text": "",
+                "extracted_records": [],
+                "reconciliation_results": {},
+            }
+            await pdf_reconciler_graph.ainvoke(initial_state)
+        except Exception as e:
+            print(f"Live PDF reconciliation on upload notice: {e}")
     
-    return {"info": f"File '{file.filename}' saved."}
+    return {"info": f"File '{file.filename}' uploaded and processed."}
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):

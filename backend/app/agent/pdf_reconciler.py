@@ -214,7 +214,7 @@ def duckdb_reconcile_node(state: PDFReconcilerState) -> Dict[str, Any]:
     matches = matches_df.to_dict(orient="records")
     exceptions = exceptions_df.to_dict(orient="records")
 
-    return {
+    results = {
         "reconciliation_results": {
             "pdf_records_extracted": len(records),
             "matched_count": len(matches),
@@ -224,6 +224,14 @@ def duckdb_reconcile_node(state: PDFReconcilerState) -> Dict[str, Any]:
             "engine": "DuckDB SQL Vectorized Engine",
         }
     }
+
+    try:
+        from app.services.reconciliation import update_latest_pdf_reconciliation
+        update_latest_pdf_reconciliation(results)
+    except Exception:
+        pass
+
+    return results
 
 
 # --- 4. Build & Compile LangGraph Workflow ---

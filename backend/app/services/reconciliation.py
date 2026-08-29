@@ -193,11 +193,21 @@ def verify_reconciliation_integrity(
     }
 
 
+LATEST_PDF_RECONCILIATION: dict[str, Any] | None = None
+
+
+def update_latest_pdf_reconciliation(results: dict[str, Any]) -> None:
+    """Updates the live PDF reconciliation state in API memory when a new PDF is processed."""
+    global LATEST_PDF_RECONCILIATION
+    LATEST_PDF_RECONCILIATION = results
+
+
 def get_reconciliation_context_summary(
     razorpay_path: str | Path | None = None,
     bank_path: str | Path | None = None,
 ) -> str:
     """Generates a structured context string of live reconciliation metrics and exception details for the AI Settlement Q&A Agent."""
+    global LATEST_PDF_RECONCILIATION
     data_dir = default_finance_data_dir()
     rp_file = razorpay_path or str(data_dir / "razorpay_settlements.csv")
     bk_file = bank_path or str(data_dir / "bank_statement.csv")
@@ -211,10 +221,14 @@ def get_reconciliation_context_summary(
         for e in exceptions
     )
 
-    forecast_inflow = sum(
+    # Forward Cash Settlement Forecasting Breakdown (T+1/T+2 clearance windows)
+    gross_matched = sum(
         float(m.get("amount") or m.get("razorpay_amount") or 0.0)
         for m in matches
     )
+    estimated_fees = gross_matched * 0.02
+    estimated_gst = estimated_fees * 0.18
+    net_projected_payout = gross_matched - (estimated_fees + estimated_gst)
 
     exceptions_summary = []
     for e in exceptions:
@@ -235,13 +249,38 @@ def get_reconciliation_context_summary(
             "recommended_action": action,
         })
 
-    summary_context = f"""Live Reconciliation Metrics:
+    pdf_context_section = ""
+    if LATEST_PDF_RECONCILIATION:
+        pdf_res = LATEST_PDF_RECONCILIATION.get("reconciliation_results", LATEST_PDF_RECONCILIATION)
+        extracted_cnt = pdf_res.get("pdf_records_extracted", len(LATEST_PDF_RECONCILIATION.get("records", [])))
+        matched_cnt = pdf_res.get("matched_count", 0)
+        exc_cnt = pdf_res.get("exception_count", 0)
+        pdf_exceptions = pdf_res.get("exceptions", [])
+        pdf_matches = pdf_res.get("matches", [])
+        
+        pdf_context_section = f"""
+
+Uploaded PDF Invoice Reconciliation Data (Latest File Processed):
+- Extracted PDF Invoices Count: {extracted_cnt}
+- Reconciled PDF Matches: {matched_cnt} ({round(matched_cnt/extracted_cnt*100, 2) if extracted_cnt else 0}%)
+- Unmatched PDF Invoice Exceptions: {exc_cnt}
+- Detailed PDF Exception Records: {pdf_exceptions}
+- PDF Matches Records: {pdf_matches}
+"""
+
+    summary_context = f"""Live Reconciliation Metrics (Batch Settlements):
 - Total Transactions Processed: {res['total_transactions']}
 - Successfully Matched Transactions: {res['matched_transactions']} ({res['match_rate']}%)
 - Bank Statement Entries: {res['bank_entries']}
 - Unmatched Exceptions Count: {res['exception_count']}
 - Total Unreconciled Discrepancy Amount: ₹{total_unreconciled:,.2f}
-- Projected Settlement Inflow (Next 7 Days): ₹{forecast_inflow:,.2f}
+
+Forward Cash Settlement Forecast (Next 7-Day Clearance Window):
+- Gross Matched Payment Volume: ₹{gross_matched:,.2f}
+- Projected Gateway Fees (2.0% Standard): ₹{estimated_fees:,.2f}
+- Estimated GST on Fees (18.0%): ₹{estimated_gst:,.2f}
+- Net Projected Bank Settlement Inflow: ₹{net_projected_payout:,.2f}
+{pdf_context_section}
 
 Detailed Exception List ({len(exceptions_summary)} records):
 {exceptions_summary}"""
